@@ -14,48 +14,39 @@ import {
  * Scrapes hotel information from Google Maps.
  * Falls back to geocoded simulation if blocked or if Puppeteer fails.
  * 
+ * @param {import('puppeteer').Browser} browser - Shared browser instance.
  * @param {string} location - Query location/city.
  * @returns {Promise<Array>}
  */
-export async function scrapeGoogleMaps(location) {
+export async function scrapeGoogleMaps(browser, location) {
   console.log(`[Google Maps Scraper] Initiating search for: "${location}"`);
   
-  let browser = null;
+  let page = null;
   try {
-    // Resolve the location coordinates using OpenStreetMap Nominatim first
     const geo = await geocodeCity(location);
     console.log(`[Google Maps Scraper] Geocoded "${location}" to (${geo.lat}, ${geo.lon})`);
 
-    // Let's attempt real Puppeteer scraping
-    browser = await launchBrowser();
-    const page = await browser.newPage();
-    
-    // Set custom user agent and viewport
+    page = await browser.newPage();
     await page.setUserAgent(getRandomUserAgent());
     await page.setViewport({ width: 1280, height: 800 });
     
     const searchUrl = `https://www.google.com/maps/search/hotels+in+${encodeURIComponent(location)}`;
     console.log(`[Google Maps Scraper] Navigating to: ${searchUrl}`);
     
-    // 15 seconds timeout for loading the main search results page
-    await page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
-    
-    // Google Maps uses dynamic scrolling list container for places.
-    // Let's wait for any element that looks like a listing card or selector.
-    // Commonly Google Maps results have class role="feed" or aria-label="Results for..."
-    await page.waitForSelector('[role="feed"]', { timeout: 4000 });
+    // 3 seconds timeout for fast real-time response
+    await page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 3000 });
+    await page.waitForSelector('[role="feed"]', { timeout: 1000 });
     
     const hotels = await page.evaluate(() => {
       const results = [];
       const cards = document.querySelectorAll('a[href*="/maps/place/"]');
       
       cards.forEach((card, index) => {
-        if (results.length >= 5) return; // Limit to top 5 for real-time performance
+        if (results.length >= 5) return;
         
         const parent = card.parentElement;
         if (!parent) return;
         
-        // Obfuscated class names are common, so we parse by text layout structure
         const nameElement = parent.querySelector('.qBF1Pd') || parent.querySelector('div[font-size="medium"]');
         const name = nameElement ? nameElement.textContent.trim() : 'Google Place Hotel';
         
@@ -86,16 +77,14 @@ export async function scrapeGoogleMaps(location) {
 
     console.log(`[Google Maps Scraper] Successfully parsed ${hotels.length} hotels from live page.`);
     
-    // For each scraped hotel, enrich the properties
     const enrichedHotels = hotels.map((h, i) => {
-      // Add coordinates close to the resolved city coordinates
       const angle = (i * 2 * Math.PI) / hotels.length;
       const offset = 0.005 + (i * 0.002);
       const lat = geo.lat + Math.sin(angle) * offset;
       const lon = geo.lon + Math.cos(angle) * offset;
       const distance = calculateDistance(geo.lat, geo.lon, lat, lon);
 
-      const nightlyPrice = Math.floor(Math.random() * 12000) + 2500; // ₹2500 to ₹14500
+      const nightlyPrice = Math.floor(Math.random() * 12000) + 2500;
       const starRating = Math.floor(h.rating);
 
       const photos = [];
@@ -116,7 +105,7 @@ export async function scrapeGoogleMaps(location) {
         city: location,
         country: 'India',
         priceRange: `${nightlyPrice} - ${Math.floor(nightlyPrice * 1.5)}`,
-        hygieneScore: parseFloat((Math.random() * 1.6 + 8.4).toFixed(1)), // 8.4 to 10.0
+        hygieneScore: parseFloat((Math.random() * 1.6 + 8.4).toFixed(1)),
         amenities: AMENITIES_POOL.slice(0, 15 + (i % 12)),
         checkIn: '14:00',
         checkOut: '11:00',
@@ -153,7 +142,27 @@ export async function scrapeGoogleMaps(location) {
       };
     });
 
-    await browser.close();
+    await page.close();
+    
+    if (enrichedHotels.length === 0) {
+      throw new Error("Zero hotel listings elements found on page.");
+    }
+
+    return enrichedHotels;
+  } catch (error) {
+    console.warn(`[Google Maps Scraper Warning] Puppeteer failed/blocked: "${error.message}". Using fallback generator.`);
+    if (page) {
+      try {
+        await page.close();
+      } catch (err) {
+        // ignore page close error
+      }
+    }
+    
+    const geo = await geocodeCity(location);
+    return generateHotelsForLocation(location, geo.lat, geo.lon, 'Google Maps');
+  }
+}
     
     // If the browser parsed 0 results (due to blocks or layout changes), fallback
     if (enrichedHotels.length === 0) {
